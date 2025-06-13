@@ -1,0 +1,138 @@
+To optimize costs in our Azure serverless architecture for read-heavy billing data stored in Cosmos DB, especially considering:
+
+Low access to records older than 3 months
+
+High storage cost in Cosmos DB
+
+Requirement to keep records accessible with low latency
+
+Here’s a cost-effective, low-maintenance, zero-downtime solution using tiered storage with Cosmos DB and Azure Blob Storage (Hot + Cool tiers), implemented seamlessly with Azure Functions and Data Access Layer abstraction.
+
+✅ Proposed Architecture Overview
+
+                  +--------------------+
+                  |  Client / API      |
+                  +--------+-----------+
+                           |
+                    Existing Read/Write APIs
+                           |
+                  +--------v---------+
+                  |  API Management  |
+                  +--------+---------+
+                           |
+                  +--------v----------------+
+                  | Billing Service         |
+                  | (Read/Write Interface)  |
+                  +--------+----------------+
+                           |
+                           v
+            +--------------+--------------------+
+            |   Data Access Layer (abstracted)  |
+            +----------+------------+-----------+
+                       |            |
+          +------------v--+     +---v----------------+
+          | Cosmos DB      |     | Azure Blob Storage |
+          | (Recent < 3mo) |     | (Archived > 3mo)    |
+          +----------------+     +--------+-----------+
+                                          ^
+                              +-----------+------------+
+                              | Azure Function (Timer) |
+                              | - Data Archiver        |
+                              +------------------------+
+
+🎯 Core Strategy
+
+Hot Data in Cosmos DB (< 3 months):
+
+Keep recent records in Cosmos DB for low-latency access.
+
+Cold Data in Azure Blob Storage (≥ 3 months):
+
+Move old records to Blob Storage (JSON format) in Cool Access Tier to save costs.
+
+Maintain metadata in Cosmos DB for lookup, or redirect reads at access time.
+
+Transparent Access Layer:
+
+Use a data access layer that checks if the record exists in Cosmos DB first.
+
+If not found, fallback to Blob Storage.
+
+Background Archival Job:
+
+Use Azure Function with Timer trigger (daily) to move records older than 3 months from Cosmos DB to Blob Storage.
+
+💸 Cost Optimization Benefits
+
+Storage	Purpose	Cost	Access Time
+Cosmos DB	Hot Data (< 3mo)	High	< 10ms
+Azure Blob (Cool)	Cold Data	Low	< 1–2s
+Azure Function	Archival Logic	Very Low	Scheduled
+
+🔧 Implementation Plan
+1. Archival Azure Function (Timer Trigger)
+Runs daily to move eligible records.
+
+Pseudocode:
+
+def archive_old_records():
+    # Connect to Cosmos DB
+    cosmos_records = cosmos_query("SELECT * FROM c WHERE c.timestamp < @date",
+                                   params={"@date": now_minus_3_months})
+    for record in cosmos_records:
+        # Write to Blob Storage
+        blob_name = f"{record['id']}.json"
+        blob_service.upload_json(container="billing-archive", blob_name=blob_name, data=record)
+
+        # Optionally insert a stub/marker in Cosmos DB or delete
+        cosmos_delete(record['id'])
+
+2. Blob Upload Script (via SDK or REST)
+
+from azure.storage.blob import BlobServiceClient
+client = BlobServiceClient.from_connection_string(CONN_STR)
+container = client.get_container_client("billing-archive")
+
+def upload_json(blob_name, data):
+    container.upload_blob(name=blob_name, data=json.dumps(data), overwrite=True)
+
+3. Read Logic in Data Access Layer
+
+def get_billing_record(record_id):
+    record = cosmos_get(record_id)
+    if record:
+        return record
+    else:
+        # fallback to Blob Storage
+        blob = blob_get(f"{record_id}.json")
+        return json.loads(blob)
+
+4. Data Format in Blob
+Each record stored as a single JSON blob, named by ID:
+
+Container: billing-archive
+
+Path: {record_id}.json
+
+🛡️ No Downtime & Seamless Transition
+Cosmos DB records are only removed after successful archival to Blob.
+
+Read access logic stays behind your existing APIs.
+
+No changes to API contract.
+
+🧰 Optional Enhancements
+Add a metadata record in Cosmos DB for archived records with a archived=true flag and blob path (for easier lookup).
+
+Blob Indexing / Azure Search if old records need to be queried (not just fetched by ID).
+
+Soft delete pattern: Keep stub records in Cosmos DB for traceability.
+
+📊 Summary
+Requirement	Solution
+Cost Optimization	Offload cold data to Azure Blob Cool Tier
+Simplicity	Azure Functions, no major service rewrites
+Data Availability	Data is always available (Cosmos + Blob fallback)
+No API Changes	Abstracted in data access layer
+No Downtime	Atomic archival with verification before deletion
+
